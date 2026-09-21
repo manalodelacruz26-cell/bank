@@ -1,0 +1,413 @@
+import sqlite3
+from collections import deque
+
+def init_db():
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_number TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            transaction_type TEXT DEFAULT 'None',
+            status TEXT DEFAULT 'Waiting',
+            served_by TEXT DEFAULT 'None'
+        )
+    """)
+
+    cursor.execute("SELECT * FROM users WHERE username = 'admin'")
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'Admin')")
+        cursor.execute("INSERT INTO users (username, password, role) VALUES ('staff', 'staff123', 'Staff')")
+        conn.commit()
+
+    conn.close()
+    sync_counters_from_db()
+
+priority_queue = deque()
+regular_queue = deque()
+
+p_counter = 1
+r_counter = 1
+
+def sync_counters_from_db():
+    global p_counter, r_counter
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT ticket_number FROM customers WHERE category = 'Priority'")
+    p_tickets = [int(r[0].replace("P-", "")) for r in cursor.fetchall() if r[0].startswith("P-")]
+    if p_tickets:
+        p_counter = max(p_tickets) + 1
+
+    cursor.execute("SELECT ticket_number FROM customers WHERE category = 'Regular'")
+    r_tickets = [int(r[0]) for r in cursor.fetchall() if r[0].isdigit()]
+    if r_tickets:
+        r_counter = max(r_tickets) + 1
+
+    conn.close()
+
+def get_positive_int(prompt):
+    while True:
+        try:
+            val = int(input(prompt))
+            if val > 0:
+                return val
+            print("   [!] Invalid input! Please enter a number greater than 0.")
+        except ValueError:
+            print("   [!] Invalid input! Please enter positive integers only.")
+
+def get_yes_no(prompt):
+    while True:
+        val = input(prompt).strip().upper()
+        if val in ["Y", "N"]:
+            return val
+        print("   [!] Invalid input! Please type 'Y' (Yes) or 'N' (No) only.")
+
+def print_header(title):
+    print("\n" + "="*55)
+    print(f"             {title}")
+    print("="*55)
+
+def display_queue():
+    p_list = ", ".join([f"[{t}] {n}" for t, n in priority_queue]) or "Empty"
+    r_list = ", ".join([f"[{t}] {n}" for t, n in regular_queue]) or "Empty"
+
+    print("\n" + "-"*55)
+    print("                  LIVE QUEUE STATUS")
+    print("-"*55)
+    print(f" Priority Line (P-#) : {p_list}")
+    print(f" Regular Line  (#)   : {r_list}")
+    print(f" Total Waiting       : {len(priority_queue) + len(regular_queue)} customer(s)")
+    print("-"*55)
+
+def enqueue_customer():
+    global p_counter, r_counter
+    print("\n--- [ ENQUEUE CUSTOMER ] ---")
+    
+    while True:
+        name = input(" Enter customer name: ").strip()
+        if name:
+            break
+        print("   [!] Customer name cannot be empty!")
+
+    is_priority = get_yes_no(" Priority Lane (PWD / Senior / Pregnant)? [Y/N]: ")
+
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+
+    if is_priority == "Y":
+        ticket = f"P-{p_counter}"
+        category = "Priority"
+        p_counter += 1
+        priority_queue.append((ticket, name))
+    else:
+        ticket = str(r_counter)
+        category = "Regular"
+        r_counter += 1
+        regular_queue.append((ticket, name))
+
+    cursor.execute("INSERT INTO customers (ticket_number, name, category, status) VALUES (?, ?, ?, 'Waiting')",
+                   (ticket, name, category))
+    conn.commit()
+    conn.close()
+
+    print(f"\n >> SUCCESS: {name} registered with Ticket #{ticket} ({category} Lane)")
+
+def select_transaction_type():
+    print("\n   Select Transaction for this Customer:")
+    print("   [1] Deposit")
+    print("   [2] Withdrawal")
+    
+    while True:
+        choice = input("   Choose Transaction (1 or 2): ").strip()
+        if choice == "1":
+            return "Deposit"
+        elif choice == "2":
+            return "Withdrawal"
+        print("   [!] Invalid option! Please select 1 or 2.")
+
+def serve_single_customer(staff_choice):
+    ticket, name, category, staff_label = None, None, None, None
+
+    if staff_choice == "1":
+        staff_label = "Staff 1 (Counter 1)"
+        if priority_queue:
+            ticket, name = priority_queue.popleft()
+            category = "Priority"
+        else:
+            return None
+
+    elif staff_choice == "2":
+        staff_label = "Staff 2 (Counter 2)"
+        if regular_queue:
+            ticket, name = regular_queue.popleft()
+            category = "Regular"
+        else:
+            return None
+
+    transaction = select_transaction_type()
+
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE customers 
+        SET status = 'Served', served_by = ?, transaction_type = ? 
+        WHERE ticket_number = ?
+    """, (staff_label, transaction, ticket))
+    conn.commit()
+    conn.close()
+
+    return {
+        "ticket": ticket, 
+        "name": name, 
+        "category": category, 
+        "staff": staff_label,
+        "transaction": transaction
+    }
+
+def process_dual_lane_menu():
+    print("\n--- [ SELECT COUNTER ] ---")
+    print(" [1] Staff 1 (Counter 1) - Priority Lane Only")
+    print(" [2] Staff 2 (Counter 2) - Regular Lane Only")
+    print(" [0] Cancel / Back")
+    
+    while True:
+        staff_choice = input("\n Select Counter (1, 2, or 0): ").strip()
+        if staff_choice in ["1", "2"]:
+            break
+        elif staff_choice == "0":
+            return
+        print("   [!] Invalid choice! Please select 1, 2, or 0.")
+
+    counter_title = "STAFF 1 (COUNTER 1 - PRIORITY LANE)" if staff_choice == "1" else "STAFF 2 (COUNTER 2 - REGULAR LANE)"
+    current_serving = None
+
+    while True:
+        print("\n" + "="*55)
+        print(f" ACTIVE COUNTER: {counter_title}")
+        print("="*55)
+
+        if current_serving:
+            print("\n [ NOW SERVING ]")
+            print(f"  --> Ticket No.   : #{current_serving['ticket']}")
+            print(f"  --> Name         : {current_serving['name'].upper()}")
+            print(f"  --> Category     : {current_serving['category']} Lane")
+            print(f"  --> Transaction  : {current_serving['transaction']}")
+            print(f"  --> Status       : Done! {current_serving['transaction']} Completed. Thank you, Goodbye!")
+        else:
+            print("\n [ NOW SERVING ] : None (Counter is Idle)")
+
+        print("\n " + "-"*51)
+        if staff_choice == "1":
+            rem_list = ", ".join([f"[{t}] {n}" for t, n in priority_queue]) or "No customers waiting in Priority line."
+            print(f" REMAINING IN PRIORITY QUEUE:\n {rem_list}")
+        else:
+            rem_list = ", ".join([f"[{t}] {n}" for t, n in regular_queue]) or "No customers waiting in Regular line."
+            print(f" REMAINING IN REGULAR QUEUE:\n {rem_list}")
+        print(" " + "-"*51)
+
+        print("\n [ COUNTER ACTION MENU ]")
+        print(" [1] Call Next Customer")
+        print(" [2] Refresh Display")
+        print(" [0] Exit Counter & Return to Dashboard")
+        
+        action = input("\n Select Action (1, 2, or 0): ").strip()
+
+        if action == "1":
+            target_queue = priority_queue if staff_choice == "1" else regular_queue
+            if not target_queue:
+                print("\n   [!] No customers in line to call.")
+                current_serving = None
+            else:
+                served_data = serve_single_customer(staff_choice)
+                if served_data:
+                    current_serving = served_data
+                    print(f"\n >> Processing Ticket #{served_data['ticket']} - {served_data['name']} ({served_data['transaction']})!")
+        elif action == "2":
+            print("\n >> Display Refreshed.")
+        elif action == "0":
+            if current_serving:
+                print(f"\n >> Finished serving Ticket #{current_serving['ticket']}. Thank you! Goodbye!")
+            print(" >> Exiting Counter Mode...")
+            break
+        else:
+            print("   [!] Invalid option! Please select 1, 2, or 0.")
+
+def view_front_rear():
+    print("\n--- [ QUEUE FRONT & REAR VIEW ] ---")
+    p_front = f"{priority_queue[0][0]}: {priority_queue[0][1]}" if priority_queue else "None"
+    p_rear = f"{priority_queue[-1][0]}: {priority_queue[-1][1]}" if priority_queue else "None"
+    r_front = f"{regular_queue[0][0]}: {regular_queue[0][1]}" if regular_queue else "None"
+    r_rear = f"{regular_queue[-1][0]}: {regular_queue[-1][1]}" if regular_queue else "None"
+
+    print(f" Priority Front : {p_front}  | Rear : {p_rear}")
+    print(f" Regular Front  : {r_front}  | Rear : {r_rear}")
+
+def search_records():
+    search_term = input("\n Enter Ticket Number or Name to search: ").strip()
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT ticket_number, name, category, transaction_type, status, served_by 
+        FROM customers 
+        WHERE ticket_number LIKE ? OR name LIKE ?
+    """, (f"%{search_term}%", f"%{search_term}%"))
+    results = cursor.fetchall()
+    conn.close()
+
+    print("\n--- SEARCH RESULTS ---")
+    if results:
+        for r in results:
+            print(f" Ticket: {r[0]} | Name: {r[1]} | Category: {r[2]} | Transaction: {r[3]} | Status: {r[4]} | Served By: {r[5]}")
+    else:
+        print(" No matching record found.")
+
+def view_all_db_records():
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, ticket_number, name, category, transaction_type, status, served_by FROM customers")
+    records = cursor.fetchall()
+    conn.close()
+
+    print("\n--- ALL OBD BANKING CUSTOMER RECORDS ---")
+    for r in records:
+        print(f" ID: {r[0]} | Ticket: {r[1]} | Name: {r[2]} | Category: {r[3]} | Transaction: {r[4]} | Status: {r[5]} | Counter: {r[6]}")
+
+def update_customer_info():
+    ticket = input("\n Enter Ticket Number to update: ").strip()
+    new_name = input(" Enter new correct Name: ").strip()
+
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE customers SET name = ? WHERE ticket_number = ?", (new_name, ticket))
+    if cursor.rowcount > 0:
+        conn.commit()
+        print(f" >> Success! Updated record for Ticket #{ticket}.")
+    else:
+        print(" >> Ticket not found.")
+    conn.close()
+
+def delete_customer_record():
+    ticket = input("\n Enter Ticket Number to delete permanently: ").strip()
+
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM customers WHERE ticket_number = ?", (ticket,))
+    if cursor.rowcount > 0:
+        conn.commit()
+        print(f" >> Record for Ticket #{ticket} permanently deleted.")
+    else:
+        print(" >> Record not found.")
+    conn.close()
+
+def login():
+    print_header("OBD BANKING SYSTEM LOGIN")
+    username = input(" Username: ").strip()
+    password = input(" Password: ").strip()
+
+    conn = sqlite3.connect("bank_system.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT role FROM users WHERE username = ? AND password = ?", (username, password))
+    user = cursor.fetchone()
+    conn.close()
+
+    if user:
+        role = user[0]
+        print(f"\n Login Successful! Welcome, {username} ({role})")
+        if role == "Admin":
+            admin_menu(username)
+        else:
+            staff_menu()
+    else:
+        print("\n [!] Invalid Credentials! Access Denied.")
+
+def staff_menu():
+    while True:
+        display_queue()
+        print("\n--- STAFF DASHBOARD ---")
+        print(" [1] Enqueue New Customer(s)")
+        print(" [2] Call / Serve Customer (Counter Mode)")
+        print(" [3] View Queue Front & Rear")
+        print(" [4] Search Customer Records")
+        print(" [5] Logout")
+        choice = input("\n Select Option (1-5): ").strip()
+
+        if choice == "1":
+            added = get_positive_int("\n How many customers to add to queue? ")
+            for _ in range(added):
+                enqueue_customer()
+        elif choice == "2":
+            process_dual_lane_menu()
+        elif choice == "3":
+            view_front_rear()
+        elif choice == "4":
+            search_records()
+        elif choice == "5":
+            print("\n Logging out Staff session...")
+            break
+        else:
+            print("   [!] Invalid option! Please select between 1 and 5.")
+
+def admin_menu(username):
+    while True:
+        display_queue()
+        print("\n--- ADMIN DASHBOARD ---")
+        print(" [1] Enqueue New Customer(s)")
+        print(" [2] Call / Serve Customer (Counter Mode)")
+        print(" [3] View Queue Front & Rear")
+        print(" [4] Search Customer Records")
+        print(" [5] View All Database Records")
+        print(" [6] Update Customer Record")
+        print(" [7] Delete Customer Record")
+        print(" [8] Logout")
+        choice = input("\n Select Option (1-8): ").strip()
+
+        if choice == "1":
+            added = get_positive_int("\n How many customers to add to queue? ")
+            for _ in range(added):
+                enqueue_customer()
+        elif choice == "2":
+            process_dual_lane_menu()
+        elif choice == "3":
+            view_front_rear()
+        elif choice == "4":
+            search_records()
+        elif choice == "5":
+            view_all_db_records()
+        elif choice == "6":
+            update_customer_info()
+        elif choice == "7":
+            delete_customer_record()
+        elif choice == "8":
+            print("\n Logging out Admin session...")
+            break
+        else:
+            print("   [!] Invalid option! Please select between 1 and 8.")
+
+if __name__ == "__main__":
+    init_db()
+    while True:
+        print_header("WELCOME TO OBD BANKING")
+        print(" [1] Login to System")
+        print(" [2] Exit Program")
+        opt = input("\n Select Option: ").strip()
+
+        if opt == "1":
+            login()
+        elif opt == "2":
+            print("\n Thank you for using OBD Banking System! Goodbye!")
+            break
+        else:
+            print("   [!] Invalid input! Please select 1 or 2.")
